@@ -52,6 +52,8 @@ class CustomProfile(ProviderProfile):
                     enabled = True
                 raw = reasoning_config.get("effort")
                 effort = str(raw).strip().lower() if raw else None
+                if effort == "none":
+                    enabled = False
 
             extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
 
