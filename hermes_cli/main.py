@@ -11150,7 +11150,10 @@ def main():
         help="Messaging gateway management",
         description="Manage the messaging gateway (Telegram, Discord, WhatsApp, Weixin, and more)",
     )
-    gateway_subparsers = gateway_parser.add_subparsers(dest="gateway_command")
+    gateway_subparsers = gateway_parser.add_subparsers(
+        dest="gateway_command",
+        metavar="{run,start,stop,restart,status,install,uninstall,list,setup,migrate-legacy}",
+    )
 
     # gateway run (default)
     gateway_run = gateway_subparsers.add_parser(
@@ -11295,6 +11298,22 @@ def main():
 
     # gateway setup
     gateway_subparsers.add_parser("setup", help="Configure messaging platforms")
+
+    gateway_mark_planned_stop = gateway_subparsers.add_parser(
+        "mark-planned-stop",
+        help=argparse.SUPPRESS,
+    )
+    gateway_subparsers._choices_actions = [
+        action
+        for action in gateway_subparsers._choices_actions
+        if getattr(action, "dest", None) != "mark-planned-stop"
+    ]
+    gateway_mark_planned_stop.add_argument(
+        "--pid",
+        type=int,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
     # gateway migrate-legacy
     gateway_migrate_legacy = gateway_subparsers.add_parser(

@@ -2177,6 +2177,7 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         path_entries.extend(_build_wsl_interop_paths(path_entries))
         path_entries.extend(common_bin_paths)
         sane_path = ":".join(path_entries)
+        exec_prefix = f"{python_path} -m hermes_cli.main{f' {profile_arg}' if profile_arg else ''}"
         return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
@@ -2187,7 +2188,8 @@ StartLimitIntervalSec=0
 Type=simple
 User={username}
 Group={group_name}
-ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run --replace
+ExecStart={exec_prefix} gateway run --replace
+ExecStop=-{exec_prefix} gateway mark-planned-stop --pid $MAINPID
 WorkingDirectory={working_dir}
 Environment="HOME={home_dir}"
 Environment="USER={username}"
@@ -2217,6 +2219,7 @@ WantedBy=multi-user.target
     path_entries.extend(_build_wsl_interop_paths(path_entries))
     path_entries.extend(common_bin_paths)
     sane_path = ":".join(path_entries)
+    exec_prefix = f"{python_path} -m hermes_cli.main{f' {profile_arg}' if profile_arg else ''}"
     return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
@@ -2225,7 +2228,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run --replace
+ExecStart={exec_prefix} gateway run --replace
+ExecStop=-{exec_prefix} gateway mark-planned-stop --pid $MAINPID
 WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
@@ -2542,6 +2546,19 @@ def systemd_start(system: bool = False):
     refresh_systemd_unit_if_needed(system=system)
     _run_systemctl(["start", get_service_name()], system=system, check=True, timeout=30)
     print(f"✓ {_service_scope_label(system).capitalize()} service started")
+
+
+def mark_planned_stop(pid: int | None = None) -> bool:
+    """Write a planned-stop marker without stopping the service recursively."""
+    try:
+        from gateway.status import get_running_pid, write_planned_stop_marker
+
+        target_pid = pid if pid and pid > 0 else get_running_pid(cleanup_stale=False)
+        if target_pid is None:
+            return False
+        return write_planned_stop_marker(target_pid)
+    except Exception:
+        return False
 
 
 
@@ -5038,6 +5055,10 @@ def _gateway_command_inner(args):
     if subcmd == "setup":
         gateway_setup()
         return
+
+    if subcmd == "mark-planned-stop":
+        ok = mark_planned_stop(getattr(args, "pid", None))
+        sys.exit(0 if ok else 1)
 
     # Service management commands
     if subcmd == "install":

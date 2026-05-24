@@ -315,7 +315,7 @@ class TestGeneratedSystemdUnits:
         timeout = int(max(60, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT) + 30)
         return f"TimeoutStopSec={timeout}"
 
-    def test_user_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self, monkeypatch):
+    def test_user_unit_marks_planned_stop_without_recursive_execstop(self, monkeypatch):
         monkeypatch.setattr(
             gateway_cli,
             "_get_restart_drain_timeout",
@@ -324,7 +324,9 @@ class TestGeneratedSystemdUnits:
         unit = gateway_cli.generate_systemd_unit(system=False)
 
         assert "ExecStart=" in unit
-        assert "ExecStop=" not in unit
+        assert "ExecStop=" in unit
+        assert "gateway mark-planned-stop --pid $MAINPID" in unit
+        assert "gateway stop" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
         # TimeoutStopSec must exceed the default drain_timeout (60s) so
@@ -376,7 +378,7 @@ class TestGeneratedSystemdUnits:
 
         assert "/mnt/c/WINDOWS/system32" in unit
 
-    def test_system_unit_avoids_recursive_execstop_and_uses_extended_stop_timeout(self, monkeypatch):
+    def test_system_unit_marks_planned_stop_without_recursive_execstop(self, monkeypatch):
         monkeypatch.setattr(
             gateway_cli,
             "_get_restart_drain_timeout",
@@ -385,7 +387,9 @@ class TestGeneratedSystemdUnits:
         unit = gateway_cli.generate_systemd_unit(system=True)
 
         assert "ExecStart=" in unit
-        assert "ExecStop=" not in unit
+        assert "ExecStop=" in unit
+        assert "gateway mark-planned-stop --pid $MAINPID" in unit
+        assert "gateway stop" not in unit
         assert "ExecReload=/bin/kill -USR1 $MAINPID" in unit
         assert f"RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}" in unit
         # TimeoutStopSec must exceed the default drain_timeout (60s) so
@@ -393,6 +397,58 @@ class TestGeneratedSystemdUnits:
         # (tool subprocess kill, adapter disconnect) runs — issue #8202.
         assert self._expected_timeout_stop_sec() in unit
         assert "WantedBy=multi-user.target" in unit
+
+
+class TestMarkPlannedStopCommand:
+    def test_mark_planned_stop_uses_explicit_pid(self, monkeypatch):
+        markers = []
+
+        monkeypatch.setattr(
+            "gateway.status.write_planned_stop_marker",
+            lambda pid: markers.append(pid) or True,
+        )
+
+        assert gateway_cli.mark_planned_stop(pid=321) is True
+        assert markers == [321]
+
+    def test_mark_planned_stop_falls_back_to_running_pid(self, monkeypatch):
+        markers = []
+
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda cleanup_stale=False: 654)
+        monkeypatch.setattr(
+            "gateway.status.write_planned_stop_marker",
+            lambda pid: markers.append(pid) or True,
+        )
+
+        assert gateway_cli.mark_planned_stop() is True
+        assert markers == [654]
+
+    def test_gateway_command_marks_planned_stop_and_exits_zero(self, monkeypatch):
+        calls = []
+
+        monkeypatch.setattr(
+            gateway_cli,
+            "mark_planned_stop",
+            lambda pid=None: calls.append(pid) or True,
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            gateway_cli.gateway_command(
+                SimpleNamespace(gateway_command="mark-planned-stop", pid=987)
+            )
+
+        assert exc_info.value.code == 0
+        assert calls == [987]
+
+    def test_gateway_command_marks_planned_stop_failure_exits_one(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "mark_planned_stop", lambda pid=None: False)
+
+        with pytest.raises(SystemExit) as exc_info:
+            gateway_cli.gateway_command(
+                SimpleNamespace(gateway_command="mark-planned-stop", pid=987)
+            )
+
+        assert exc_info.value.code == 1
 
 
 class TestGatewayStopCleanup:
