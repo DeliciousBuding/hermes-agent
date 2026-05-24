@@ -1210,6 +1210,10 @@ class WeixinAdapter(BasePlatformAdapter):
             extra.get("send_chunk_retry_delay_seconds")
             or os.getenv("WEIXIN_SEND_CHUNK_RETRY_DELAY_SECONDS", "1.0")
         )
+        self._send_chunk_rate_limit_backoff_seconds = float(
+            extra.get("send_chunk_rate_limit_backoff_seconds")
+            or os.getenv("WEIXIN_SEND_CHUNK_RATE_LIMIT_BACKOFF_SECONDS", "60")
+        )
         self._dm_policy = str(extra.get("dm_policy") or os.getenv("WEIXIN_DM_POLICY", "open")).strip().lower()
         self._group_policy = str(extra.get("group_policy") or os.getenv("WEIXIN_GROUP_POLICY", "disabled")).strip().lower()
         allow_from = extra.get("allow_from")
@@ -1634,7 +1638,7 @@ class WeixinAdapter(BasePlatformAdapter):
                             )
                             if attempt >= self._send_chunk_retries:
                                 break
-                            wait = self._send_chunk_retry_delay_seconds * 3  # 3x backoff for rate limit
+                            wait = self._send_chunk_rate_limit_backoff_seconds
                             logger.warning(
                                 "[%s] rate limited for %s; backing off %.1fs before retry",
                                 self.name, _safe_id(chat_id), wait,
