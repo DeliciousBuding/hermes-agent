@@ -65,6 +65,7 @@ _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
+_SHUTDOWN_NOTIFY_TIMEOUT_SECS_DEFAULT = 3.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
@@ -2031,6 +2032,21 @@ class GatewayRunner:
                 return max(0.0, timeout)
         return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
 
+    def _shutdown_notify_timeout_secs(self) -> float:
+        """Return the per-message timeout for shutdown/restart notifications."""
+        raw = os.getenv("HERMES_GATEWAY_SHUTDOWN_NOTIFY_TIMEOUT", "").strip()
+        if raw:
+            try:
+                timeout = float(raw)
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid HERMES_GATEWAY_SHUTDOWN_NOTIFY_TIMEOUT=%r",
+                    raw,
+                )
+            else:
+                return max(0.0, timeout)
+        return _SHUTDOWN_NOTIFY_TIMEOUT_SECS_DEFAULT
+
     async def _connect_adapter_with_timeout(self, adapter, platform) -> bool:
         """Connect an adapter without allowing one platform to block others."""
         timeout = self._platform_connect_timeout_secs()
@@ -2041,6 +2057,21 @@ class GatewayRunner:
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
                 f"{platform.value} connect timed out after {timeout:g}s"
+            ) from exc
+
+    async def _send_shutdown_notification(self, adapter, chat_id: str, content: str, **send_kwargs):
+        """Send a shutdown notice without letting platform backoff stall stop()."""
+        timeout = self._shutdown_notify_timeout_secs()
+        if timeout <= 0:
+            return await adapter.send(chat_id, content, **send_kwargs)
+        try:
+            return await asyncio.wait_for(
+                adapter.send(chat_id, content, **send_kwargs),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"shutdown notification send timed out after {timeout:g}s"
             ) from exc
 
     @property
@@ -3261,7 +3292,12 @@ class GatewayRunner:
                 # correct forum topic / thread.
                 metadata = {"thread_id": thread_id} if thread_id else None
 
-                result = await adapter.send(chat_id, msg, metadata=metadata)
+                result = await self._send_shutdown_notification(
+                    adapter,
+                    chat_id,
+                    msg,
+                    metadata=metadata,
+                )
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to %s:%s: %s",
@@ -3307,9 +3343,18 @@ class GatewayRunner:
             try:
                 metadata = {"thread_id": home.thread_id} if home.thread_id else None
                 if metadata:
-                    result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
+                    result = await self._send_shutdown_notification(
+                        adapter,
+                        str(home.chat_id),
+                        msg,
+                        metadata=metadata,
+                    )
                 else:
-                    result = await adapter.send(str(home.chat_id), msg)
+                    result = await self._send_shutdown_notification(
+                        adapter,
+                        str(home.chat_id),
+                        msg,
+                    )
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to home channel %s:%s: %s",
