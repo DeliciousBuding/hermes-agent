@@ -324,6 +324,31 @@ class TestLoadGatewayConfig:
 
         assert os.environ.get("DISCORD_THREAD_REQUIRE_MENTION") == "true"
 
+    def test_discord_yaml_settings_do_not_enable_without_token(self, tmp_path, monkeypatch):
+        """Discord YAML behavior settings should not start the adapter without a token."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "discord:\n"
+            "  require_mention: true\n"
+            "  free_response_channels: \"\"\n"
+            "  channel_prompts: {}\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("DISCORD_REQUIRE_MENTION", raising=False)
+        monkeypatch.delenv("DISCORD_FREE_RESPONSE_CHANNELS", raising=False)
+
+        config = load_gateway_config()
+
+        discord_config = config.platforms.get(Platform.DISCORD)
+        assert discord_config is not None
+        assert discord_config.enabled is False
+        assert discord_config.extra["require_mention"] is True
+
     def test_thread_require_mention_yaml_does_not_overwrite_env(self, tmp_path, monkeypatch):
         """Explicit env var should win over config.yaml (env > yaml precedence)."""
         hermes_home = tmp_path / ".hermes"

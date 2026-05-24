@@ -1807,10 +1807,13 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             pass
 
     # Registry-driven enable for plugin platforms.  Built-ins have explicit
-    # blocks above; plugins expose check_fn() which is the single source of
-    # truth for "are my env vars set?".  When it returns True, ensure the
-    # platform is enabled so start() will create its adapter.  Plugins that
-    # need to seed ``PlatformConfig.extra`` from env vars (e.g. Google Chat's
+    # blocks above.  For plugins, ``check_fn`` only proves dependencies are
+    # installed; ``is_connected`` / ``validate_config`` decides whether the
+    # platform has usable credentials/config. This avoids enabling a plugin
+    # adapter just because its Python package is present (for example Discord
+    # without DISCORD_BOT_TOKEN), while still letting env-configured plugins
+    # come online without a YAML ``enabled: true`` stanza. Plugins that need to
+    # seed ``PlatformConfig.extra`` from env vars (e.g. Google Chat's
     # project_id / subscription_name) can supply ``env_enablement_fn`` on
     # their PlatformEntry — called here BEFORE adapter construction.
     try:
@@ -1825,9 +1828,11 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 logger.debug("check_fn for %s raised: %s", entry.name, e)
                 continue
             platform = Platform(entry.name)
+            explicit_enabled_false = False
             if platform not in config.platforms:
                 config.platforms[platform] = PlatformConfig()
-            config.platforms[platform].enabled = True
+            else:
+                explicit_enabled_false = config.platforms[platform].enabled is False
             # Seed extras from env if the plugin opted in.
             if entry.env_enablement_fn is not None:
                 try:
@@ -1854,5 +1859,30 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                                 else None
                             ),
                         )
+            platform_config = config.platforms[platform]
+            if explicit_enabled_false:
+                continue
+            connected = None
+            if entry.is_connected is not None:
+                try:
+                    connected = bool(entry.is_connected(platform_config))
+                except Exception as e:
+                    logger.debug("is_connected for %s raised: %s", entry.name, e)
+                    connected = False
+            elif entry.validate_config is not None:
+                try:
+                    connected = bool(entry.validate_config(platform_config))
+                except Exception as e:
+                    logger.debug("validate_config for %s raised: %s", entry.name, e)
+                    connected = False
+            elif entry.required_env:
+                connected = all(
+                    bool((os.getenv(env_name) or "").strip())
+                    for env_name in entry.required_env
+                )
+            else:
+                connected = bool(entry.env_enablement_fn is not None)
+            if connected:
+                platform_config.enabled = True
     except Exception as e:
         logger.debug("Plugin platform enable pass failed: %s", e)
