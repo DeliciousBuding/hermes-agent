@@ -338,6 +338,52 @@ async def test_send_home_channel_startup_notification_ignores_false_send_result(
 
 
 @pytest.mark.asyncio
+async def test_home_channel_startup_notification_send_timeout_does_not_block(monkeypatch):
+    runner, adapter = make_restart_runner()
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="home-42",
+        name="Ops Home",
+    )
+    monkeypatch.setenv("HERMES_GATEWAY_LIFECYCLE_NOTIFY_TIMEOUT", "0.01")
+
+    async def slow_send(*_args, **_kwargs):
+        await asyncio.sleep(10)
+        return SendResult(success=True, message_id="late")
+
+    adapter.send = AsyncMock(side_effect=slow_send)
+
+    delivered = await asyncio.wait_for(
+        runner._send_home_channel_startup_notifications(),
+        timeout=0.2,
+    )
+
+    assert delivered == set()
+    adapter.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_home_channel_startup_notification_uses_adapter_snapshot(monkeypatch):
+    runner, adapter = make_restart_runner()
+    runner.config.platforms[Platform.TELEGRAM].home_channel = HomeChannel(
+        platform=Platform.TELEGRAM,
+        chat_id="home-42",
+        name="Ops Home",
+    )
+
+    async def send_and_mutate(*_args, **_kwargs):
+        runner.adapters.pop(Platform.TELEGRAM, None)
+        return SendResult(success=False, error="adapter removed")
+
+    adapter.send = AsyncMock(side_effect=send_and_mutate)
+
+    delivered = await runner._send_home_channel_startup_notifications()
+
+    assert delivered == set()
+    adapter.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_notification_send_timeout_does_not_block_active_chat(monkeypatch):
     runner, adapter = make_restart_runner()
     runner._running_agents["agent:main:telegram:dm:999"] = MagicMock()

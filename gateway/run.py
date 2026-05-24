@@ -65,7 +65,7 @@ _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
-_SHUTDOWN_NOTIFY_TIMEOUT_SECS_DEFAULT = 3.0
+_LIFECYCLE_NOTIFY_TIMEOUT_SECS_DEFAULT = 3.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
 _TELEGRAM_NOISY_STATUS_RE = re.compile(
@@ -2032,20 +2032,24 @@ class GatewayRunner:
                 return max(0.0, timeout)
         return _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT
 
-    def _shutdown_notify_timeout_secs(self) -> float:
-        """Return the per-message timeout for shutdown/restart notifications."""
-        raw = os.getenv("HERMES_GATEWAY_SHUTDOWN_NOTIFY_TIMEOUT", "").strip()
-        if raw:
+    def _lifecycle_notify_timeout_secs(self) -> float:
+        """Return the per-message timeout for lifecycle notifications."""
+        env_names = (
+            "HERMES_GATEWAY_LIFECYCLE_NOTIFY_TIMEOUT",
+            # Backward-compatible alias from the original shutdown-only guard.
+            "HERMES_GATEWAY_SHUTDOWN_NOTIFY_TIMEOUT",
+        )
+        for env_name in env_names:
+            raw = os.getenv(env_name, "").strip()
+            if not raw:
+                continue
             try:
                 timeout = float(raw)
             except ValueError:
-                logger.warning(
-                    "Ignoring invalid HERMES_GATEWAY_SHUTDOWN_NOTIFY_TIMEOUT=%r",
-                    raw,
-                )
+                logger.warning("Ignoring invalid %s=%r", env_name, raw)
             else:
                 return max(0.0, timeout)
-        return _SHUTDOWN_NOTIFY_TIMEOUT_SECS_DEFAULT
+        return _LIFECYCLE_NOTIFY_TIMEOUT_SECS_DEFAULT
 
     async def _connect_adapter_with_timeout(self, adapter, platform) -> bool:
         """Connect an adapter without allowing one platform to block others."""
@@ -2059,9 +2063,15 @@ class GatewayRunner:
                 f"{platform.value} connect timed out after {timeout:g}s"
             ) from exc
 
-    async def _send_shutdown_notification(self, adapter, chat_id: str, content: str, **send_kwargs):
-        """Send a shutdown notice without letting platform backoff stall stop()."""
-        timeout = self._shutdown_notify_timeout_secs()
+    async def _send_lifecycle_notification(
+        self,
+        adapter,
+        chat_id: str,
+        content: str,
+        **send_kwargs,
+    ):
+        """Send a lifecycle notice without letting platform backoff stall."""
+        timeout = self._lifecycle_notify_timeout_secs()
         if timeout <= 0:
             return await adapter.send(chat_id, content, **send_kwargs)
         try:
@@ -2071,7 +2081,7 @@ class GatewayRunner:
             )
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
-                f"shutdown notification send timed out after {timeout:g}s"
+                f"lifecycle notification send timed out after {timeout:g}s"
             ) from exc
 
     @property
@@ -3292,7 +3302,7 @@ class GatewayRunner:
                 # correct forum topic / thread.
                 metadata = {"thread_id": thread_id} if thread_id else None
 
-                result = await self._send_shutdown_notification(
+                result = await self._send_lifecycle_notification(
                     adapter,
                     chat_id,
                     msg,
@@ -3343,14 +3353,14 @@ class GatewayRunner:
             try:
                 metadata = {"thread_id": home.thread_id} if home.thread_id else None
                 if metadata:
-                    result = await self._send_shutdown_notification(
+                    result = await self._send_lifecycle_notification(
                         adapter,
                         str(home.chat_id),
                         msg,
                         metadata=metadata,
                     )
                 else:
-                    result = await self._send_shutdown_notification(
+                    result = await self._send_lifecycle_notification(
                         adapter,
                         str(home.chat_id),
                         msg,
@@ -14190,7 +14200,8 @@ class GatewayRunner:
                 return None
 
             metadata = {"thread_id": thread_id} if thread_id else None
-            result = await adapter.send(
+            result = await self._send_lifecycle_notification(
+                adapter,
                 str(chat_id),
                 "♻ Gateway restarted successfully. Your session continues.",
                 metadata=metadata,
@@ -14235,7 +14246,7 @@ class GatewayRunner:
         skipped = skip_targets or set()
         message = "♻️ Gateway online — Hermes is back and ready."
 
-        for platform, adapter in self.adapters.items():
+        for platform, adapter in list(self.adapters.items()):
             home = self.config.get_home_channel(platform)
             if not home or not home.chat_id:
                 continue
@@ -14255,9 +14266,18 @@ class GatewayRunner:
             try:
                 metadata = {"thread_id": home.thread_id} if home.thread_id else None
                 if metadata:
-                    result = await adapter.send(str(home.chat_id), message, metadata=metadata)
+                    result = await self._send_lifecycle_notification(
+                        adapter,
+                        str(home.chat_id),
+                        message,
+                        metadata=metadata,
+                    )
                 else:
-                    result = await adapter.send(str(home.chat_id), message)
+                    result = await self._send_lifecycle_notification(
+                        adapter,
+                        str(home.chat_id),
+                        message,
+                    )
                 if result is not None and getattr(result, "success", True) is False:
                     logger.warning(
                         "Home-channel startup notification failed for %s:%s: %s",
