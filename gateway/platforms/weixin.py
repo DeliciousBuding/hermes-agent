@@ -1314,6 +1314,15 @@ class WeixinAdapter(BasePlatformAdapter):
         self._mark_disconnected()
         logger.info("[%s] Disconnected", self.name)
 
+    def _send_available(self) -> bool:
+        session = self._send_session
+        return bool(
+            self._running
+            and session
+            and not getattr(session, "closed", False)
+            and self._token
+        )
+
     async def _poll_loop(self) -> None:
         assert self._poll_session is not None
         sync_buf = _load_sync_buf(self._hermes_home, self._account_id)
@@ -1591,9 +1600,14 @@ class WeixinAdapter(BasePlatformAdapter):
         last_error: Optional[Exception] = None
         retried_without_token = False
         for attempt in range(self._send_chunk_retries + 1):
+            if not self._send_available():
+                raise RuntimeError("Not connected")
             try:
+                session = self._send_session
+                if session is None:
+                    raise RuntimeError("Not connected")
                 resp = await _send_message(
-                    self._send_session,
+                    session,
                     base_url=self._base_url,
                     token=self._token,
                     to=chat_id,
@@ -1639,11 +1653,14 @@ class WeixinAdapter(BasePlatformAdapter):
                             if attempt >= self._send_chunk_retries:
                                 break
                             wait = self._send_chunk_rate_limit_backoff_seconds
+                            if not self._send_available():
+                                raise RuntimeError("Not connected")
                             logger.warning(
                                 "[%s] rate limited for %s; backing off %.1fs before retry",
                                 self.name, _safe_id(chat_id), wait,
                             )
-                            await asyncio.sleep(wait)
+                            if wait > 0:
+                                await asyncio.sleep(wait)
                             continue
                         errmsg = resp.get("errmsg") or resp.get("msg") or "unknown error"
                         raise RuntimeError(
@@ -1676,8 +1693,6 @@ class WeixinAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        if not self._send_session or not self._token:
-            return SendResult(success=False, error="Not connected")
         context_token = self._token_store.get(self._account_id, chat_id)
         last_message_id: Optional[str] = None
 
@@ -1706,6 +1721,8 @@ class WeixinAdapter(BasePlatformAdapter):
         try:
             # Deliver extracted MEDIA: attachments first.
             for media_path, is_voice in media_files:
+                if not self._send_available():
+                    return SendResult(success=False, error="Not connected")
                 try:
                     await _deliver_media(media_path, is_voice)
                 except Exception as exc:
@@ -1713,6 +1730,8 @@ class WeixinAdapter(BasePlatformAdapter):
 
             # Deliver bare local file paths.
             for file_path in local_files:
+                if not self._send_available():
+                    return SendResult(success=False, error="Not connected")
                 try:
                     await _deliver_media(file_path, is_voice=False)
                 except Exception as exc:
@@ -1720,6 +1739,8 @@ class WeixinAdapter(BasePlatformAdapter):
 
             # Deliver text content.
             chunks = [c for c in self._split_text(self.format_message(final_content)) if c and c.strip()]
+            if chunks and not self._send_available():
+                return SendResult(success=False, error="Not connected")
             for idx, chunk in enumerate(chunks):
                 client_id = f"hermes-weixin-{uuid.uuid4().hex}"
                 await self._send_text_chunk(
@@ -2149,6 +2170,7 @@ async def send_weixin_direct(
         adapter._base_url = base_url
         adapter._cdn_base_url = cdn_base_url
         adapter._token_store = token_store
+        adapter._running = True
 
         last_result: Optional[SendResult] = None
         cleaned = adapter.format_message(message)

@@ -533,8 +533,51 @@ class WebhookAdapter(BasePlatformAdapter):
                 len(prompt),
                 delivery_id,
             )
+            timeout_raw = route_config.get("direct_delivery_timeout_seconds")
+            timeout: Optional[float] = None
+            if timeout_raw is not None:
+                try:
+                    timeout = max(0.0, float(timeout_raw))
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "[webhook] Invalid direct_delivery_timeout_seconds=%r for route=%s",
+                        timeout_raw,
+                        route_name,
+                    )
             try:
-                result = await self._direct_deliver(prompt, delivery)
+                if timeout is None or timeout <= 0:
+                    result = await self._direct_deliver(prompt, delivery)
+                else:
+                    task = asyncio.create_task(self._direct_deliver(prompt, delivery))
+                    done, _pending = await asyncio.wait({task}, timeout=timeout)
+                    if not done:
+                        self._background_tasks.add(task)
+                        task.add_done_callback(self._background_tasks.discard)
+
+                        def _log_background_direct_delivery_failure(done_task: asyncio.Task) -> None:
+                            if done_task.cancelled():
+                                return
+                            exc = done_task.exception()
+                            if exc is None:
+                                return
+                            logger.error(
+                                "[webhook] background direct-deliver failed route=%s delivery=%s",
+                                route_name,
+                                delivery_id,
+                                exc_info=(type(exc), exc, exc.__traceback__),
+                            )
+
+                        task.add_done_callback(_log_background_direct_delivery_failure)
+                        return web.json_response(
+                            {
+                                "status": "accepted",
+                                "route": route_name,
+                                "target": delivery["deliver"],
+                                "delivery_id": delivery_id,
+                            },
+                            status=202,
+                        )
+                    result = task.result()
             except Exception:
                 logger.exception(
                     "[webhook] direct-deliver failed route=%s delivery=%s",

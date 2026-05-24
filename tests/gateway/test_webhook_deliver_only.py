@@ -245,6 +245,44 @@ class TestDeliverOnlyStatusCodes:
             assert "exploded" not in json.dumps(data)
 
     @pytest.mark.asyncio
+    async def test_slow_delivery_returns_202_and_continues_in_background(self):
+        """Slow target sends should not block the webhook sender."""
+        routes = {
+            "r": {
+                "secret": _INSECURE_NO_AUTH,
+                "deliver": "telegram",
+                "deliver_only": True,
+                "direct_delivery_timeout_seconds": 0.01,
+                "deliver_extra": {"chat_id": "c-1"},
+                "prompt": "hi",
+            }
+        }
+        adapter = _make_adapter(routes)
+        mock_target = _wire_mock_target(adapter)
+
+        async def slow_send(*_args, **_kwargs):
+            await asyncio.sleep(0.05)
+            return SendResult(success=True)
+
+        mock_target.send = AsyncMock(side_effect=slow_send)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/r",
+                json={},
+                headers={"X-GitHub-Delivery": "d-slow-1"},
+            )
+            assert resp.status == 202
+            data = await resp.json()
+            assert data["status"] == "accepted"
+            assert data["route"] == "r"
+            assert data["target"] == "telegram"
+
+        await asyncio.sleep(0.08)
+        mock_target.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_target_platform_not_connected_returns_502(self):
         """deliver_only to a platform the gateway doesn't have → 502."""
         routes = {
