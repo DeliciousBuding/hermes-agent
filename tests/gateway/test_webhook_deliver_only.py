@@ -283,6 +283,53 @@ class TestDeliverOnlyStatusCodes:
         mock_target.send.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_slow_delivery_inflight_limit_rejects_overflow(self):
+        """Bounded background sends prevent slow targets from piling up."""
+        routes = {
+            "r": {
+                "secret": _INSECURE_NO_AUTH,
+                "deliver": "telegram",
+                "deliver_only": True,
+                "direct_delivery_timeout_seconds": 0.01,
+                "direct_delivery_max_inflight": 1,
+                "deliver_extra": {"chat_id": "c-1"},
+                "prompt": "hi",
+            }
+        }
+        adapter = _make_adapter(routes)
+        mock_target = _wire_mock_target(adapter)
+        release_send = asyncio.Event()
+
+        async def slow_send(*_args, **_kwargs):
+            await release_send.wait()
+            return SendResult(success=True)
+
+        mock_target.send = AsyncMock(side_effect=slow_send)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/r",
+                json={},
+                headers={"X-GitHub-Delivery": "d-slow-limit-1"},
+            )
+            assert first.status == 202
+
+            second = await cli.post(
+                "/webhooks/r",
+                json={},
+                headers={"X-GitHub-Delivery": "d-slow-limit-2"},
+            )
+            assert second.status == 429
+            data = await second.json()
+            assert data["status"] == "busy"
+            assert data["route"] == "r"
+
+        release_send.set()
+        await asyncio.sleep(0.05)
+        mock_target.send.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_target_platform_not_connected_returns_502(self):
         """deliver_only to a platform the gateway doesn't have → 502."""
         routes = {
