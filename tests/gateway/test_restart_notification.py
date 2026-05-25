@@ -421,6 +421,23 @@ async def test_shutdown_notification_send_timeout_does_not_block_home_channel(mo
     adapter.send.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_lifecycle_notification_for_weixin_disables_chunk_backoff():
+    runner, adapter = make_restart_runner()
+    adapter.platform = Platform.WEIXIN
+    adapter.send = AsyncMock(return_value=SendResult(success=False, error="rate limited"))
+
+    await runner._send_lifecycle_notification(adapter, "wxid-home", "Gateway restarting")
+
+    adapter.send.assert_awaited_once()
+    metadata = adapter.send.await_args.kwargs.get("metadata")
+    assert metadata == {
+        "weixin_send_chunk_retries": 0,
+        "weixin_send_chunk_retry_delay_seconds": 0,
+        "weixin_send_chunk_rate_limit_backoff_seconds": 0,
+    }
+
+
 # ── _send_restart_notification ───────────────────────────────────────────
 
 

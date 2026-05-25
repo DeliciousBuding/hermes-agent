@@ -1972,7 +1972,7 @@ class GatewayRunner:
                 if mode in {"voice_only", "all"} and key.startswith(prefix)
             )
 
-    async def _safe_adapter_disconnect(self, adapter, platform) -> None:
+    async def _safe_adapter_disconnect(self, adapter, platform) -> bool:
         """Call adapter.disconnect() defensively, swallowing any error.
 
         Used when adapter.connect() failed or raised — the adapter may
@@ -1989,18 +1989,21 @@ class GatewayRunner:
                 await adapter.disconnect()
             else:
                 await asyncio.wait_for(adapter.disconnect(), timeout=timeout)
+            return True
         except asyncio.TimeoutError:
             logger.warning(
                 "Timed out after %.1fs while disconnecting %s adapter; continuing shutdown",
                 timeout,
                 platform.value if platform is not None else "adapter",
             )
+            return False
         except Exception as e:
             logger.debug(
                 "Defensive %s disconnect after failed connect raised: %s",
                 platform.value if platform is not None else "adapter",
                 e,
             )
+            return False
 
     def _adapter_disconnect_timeout_secs(self) -> float:
         """Return the per-adapter disconnect timeout used during shutdown."""
@@ -2071,6 +2074,16 @@ class GatewayRunner:
         **send_kwargs,
     ):
         """Send a lifecycle notice without letting platform backoff stall."""
+        if getattr(adapter, "platform", None) == Platform.WEIXIN:
+            metadata = dict(send_kwargs.get("metadata") or {})
+            metadata.update(
+                {
+                    "weixin_send_chunk_retries": 0,
+                    "weixin_send_chunk_retry_delay_seconds": 0,
+                    "weixin_send_chunk_rate_limit_backoff_seconds": 0,
+                }
+            )
+            send_kwargs["metadata"] = metadata
         timeout = self._lifecycle_notify_timeout_secs()
         if timeout <= 0:
             return await adapter.send(chat_id, content, **send_kwargs)
@@ -5919,19 +5932,17 @@ class GatewayRunner:
                     await adapter.cancel_background_tasks()
                 except Exception as e:
                     logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
-                try:
-                    await adapter.disconnect()
+                if await self._safe_adapter_disconnect(adapter, platform):
                     logger.info(
                         "✓ %s disconnected (%.2fs)",
                         platform.value,
                         time.monotonic() - _adapter_started_at,
                     )
-                except Exception as e:
-                    logger.error(
-                        "✗ %s disconnect error after %.2fs: %s",
+                else:
+                    logger.warning(
+                        "✗ %s disconnect incomplete after %.2fs; continuing shutdown",
                         platform.value,
                         time.monotonic() - _adapter_started_at,
-                        e,
                     )
             logger.info(
                 "Shutdown phase: all adapters disconnected at +%.2fs",

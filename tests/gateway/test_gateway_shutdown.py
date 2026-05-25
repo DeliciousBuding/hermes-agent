@@ -245,3 +245,20 @@ async def test_gateway_stop_kills_tool_subprocesses_on_graceful_path(monkeypatch
 
     # Only the final catch-all fires on the graceful path.
     assert kill_count == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_times_out_slow_adapter_disconnect(monkeypatch):
+    runner, adapter = make_restart_runner()
+    monkeypatch.setenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "0.01")
+
+    async def slow_disconnect():
+        await asyncio.sleep(60)
+
+    adapter.disconnect = AsyncMock(side_effect=slow_disconnect)
+
+    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+        await asyncio.wait_for(runner.stop(), timeout=0.2)
+
+    adapter.disconnect.assert_awaited_once()
+    assert runner._shutdown_event.is_set() is True
