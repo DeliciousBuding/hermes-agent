@@ -696,10 +696,10 @@ class WebhookAdapter(BasePlatformAdapter):
             # Delivery attempted but target rejected it — surface as 502
             # with a generic error (don't leak adapter-level detail).
             logger.warning(
-                "[webhook] direct-deliver target rejected route=%s target=%s error=%s",
+                "[webhook] direct-deliver target rejected route=%s target=%s delivery=%s",
                 route_name,
                 delivery["deliver"],
-                result.error,
+                delivery_id,
             )
             if route_config.get("direct_delivery_ack_on_failure"):
                 _mark_delivery_seen()

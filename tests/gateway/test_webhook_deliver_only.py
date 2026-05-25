@@ -251,6 +251,41 @@ class TestDeliverOnlyStatusCodes:
             assert "rate limited" not in json.dumps(data)
 
     @pytest.mark.asyncio
+    async def test_delivery_failure_logs_generic_rejection(self, caplog):
+        """Adapter error strings should not leak into rejection logs."""
+        routes = {
+            "r": {
+                "secret": _INSECURE_NO_AUTH,
+                "deliver": "telegram",
+                "deliver_only": True,
+                "deliver_extra": {"chat_id": "c-1"},
+                "prompt": "hi",
+            }
+        }
+        adapter = _make_adapter(routes)
+        mock_target = _wire_mock_target(adapter)
+        mock_target.send = AsyncMock(
+            return_value=SendResult(success=False, error="rate limited by tg")
+        )
+
+        app = _create_app(adapter)
+        with caplog.at_level("WARNING", logger="gateway.platforms.webhook"):
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.post(
+                    "/webhooks/r",
+                    json={},
+                    headers={"X-GitHub-Delivery": "d-fail-log-1"},
+                )
+                assert resp.status == 502
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "direct-deliver target rejected route=r target=telegram" in message
+            for message in messages
+        )
+        assert not any("rate limited by tg" in message for message in messages)
+
+    @pytest.mark.asyncio
     async def test_delivery_failure_does_not_poison_idempotency(self):
         """A failed delivery may be retried with the same delivery id."""
         routes = {
